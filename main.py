@@ -4,6 +4,10 @@ from typing import Optional
 
 app = FastAPI(title="RCQ-TBILL Token Issuance API")
 
+@app.get("/")
+async def root():
+    return {"message": "RCQ-TBILL API is live. Use /docs for API."}
+
 # === Config ===
 XRPL_ISSUER_ADDRESS = "rXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"  # Your Trust's XRPL address
 
