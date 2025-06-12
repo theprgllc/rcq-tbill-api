@@ -16,6 +16,7 @@ RPC_URL = os.getenv(
 )
 client = JsonRpcClient(RPC_URL)
 
+# Load and validate secret seeds
 ISSUER_SEED  = os.getenv("ISSUER_SEED")
 SIGNER1_SEED = os.getenv("SIGNER1_SEED")
 SIGNER2_SEED = os.getenv("SIGNER2_SEED")
@@ -23,17 +24,19 @@ for key, val in [("ISSUER_SEED", ISSUER_SEED), ("SIGNER1_SEED", SIGNER1_SEED), (
     if not val:
         raise RuntimeError(f"Missing environment variable: {key}")
 
+# Initialize wallets with sequence=0
 issuer_wallet  = Wallet(ISSUER_SEED, 0)
 signer1_wallet = Wallet(SIGNER1_SEED, 0)
 signer2_wallet = Wallet(SIGNER2_SEED, 0)
 
+# RCQ-TBILL custom token code (40-character HEX)
 CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
 
 # ─── Pydantic Models ─────────────────────────────────────────────────
 class MintRequest(BaseModel):
     cusip: str
     amount: float
-    date: str
+    date: str    # ISO 8601 date
 
 class MintResponse(BaseModel):
     status: str
@@ -49,45 +52,50 @@ async def root():
 @app.post("/mint", response_model=MintResponse)
 def mint_tbill(req: MintRequest):
     try:
-        # 1) Get issuer sequence
-        info = client.request(
-            AccountInfo(account=issuer_wallet.classic_address, ledger_index="current")
+        # 1) Fetch current sequence
+        acct_info = client.request(
+            AccountInfo(
+                account=issuer_wallet.classic_address,
+                ledger_index="current"
+            )
         ).result
-        seq = info["account_data"]["Sequence"]
+        sequence = acct_info["account_data"]["Sequence"]
 
-        # 2) Build unsigned Payment
-        amt = IssuedCurrencyAmount(
+        # 2) Build unsigned Payment transaction
+        issued_amt = IssuedCurrencyAmount(
             currency=CURRENCY_HEX,
             issuer=issuer_wallet.classic_address,
             value=str(req.amount)
         )
         tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=issuer_wallet.classic_address,
-            amount=amt,
-            send_max=amt,
-            sequence=seq,
+            destination=issuer_wallet.classic_address,  # update if needed
+            amount=issued_amt,
+            send_max=issued_amt,
+            sequence=sequence,
             fee="12",
             signing_pub_key=""
         )
 
-        # 3) Each signer signs the same tx
+        # 3) Each signer signs the same transaction
         sig1 = sign(tx, signer1_wallet, multisign=True)
         sig2 = sign(tx, signer2_wallet, multisign=True)
+        # Extract SignerEntry models
+        s1 = [entry.to_dict() for entry in sig1.signers]
+        s2 = [entry.to_dict() for entry in sig2.signers]
 
-        # 4) Combine Signers
-        s1 = sig1["tx_json"]["Signers"]
-        s2 = sig2["tx_json"]["Signers"]
+        # 4) Combine into a multisigned payload
         multi_payload = {**tx.to_dict(), "Signers": s1 + s2}
 
-        # 5) Submit
+        # 5) Submit via JSON-RPC
         resp = client.request(Submit(tx_json=multi_payload)).result
         if resp.get("engine_result") != "tesSUCCESS":
             raise HTTPException(500, f"XRPL error: {resp.get('engine_result')}")
 
         return MintResponse(status="success", tx_hash=resp["tx_json"]["hash"])
     except Exception as e:
-        raise HTTPException(500, detail=f"Mint failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
+
 
 
 
