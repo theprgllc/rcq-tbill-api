@@ -8,6 +8,7 @@ from xrpl.models.transactions import Payment
 from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.requests import AccountInfo, Submit
 from xrpl.transaction import sign
+from xrpl.core.binarycodec import encode  # for tx_blob encoding
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────
 RPC_URL = os.getenv(
@@ -53,13 +54,13 @@ async def root():
 def mint_tbill(req: MintRequest):
     try:
         # 1) Fetch current sequence
-        acct_info = client.request(
+        info = client.request(
             AccountInfo(
                 account=issuer_wallet.classic_address,
                 ledger_index="current"
             )
         ).result
-        sequence = acct_info["account_data"]["Sequence"]
+        seq = info["account_data"]["Sequence"]
 
         # 2) Build unsigned Payment transaction
         issued_amt = IssuedCurrencyAmount(
@@ -69,26 +70,27 @@ def mint_tbill(req: MintRequest):
         )
         tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=issuer_wallet.classic_address,  # update if needed
+            destination=issuer_wallet.classic_address,
             amount=issued_amt,
             send_max=issued_amt,
-            sequence=sequence,
+            sequence=seq,
             fee="12",
             signing_pub_key=""
         )
 
         # 3) Each signer signs the same transaction
-        sig1 = sign(tx, signer1_wallet, multisign=True)
-        sig2 = sign(tx, signer2_wallet, multisign=True)
-        # Extract SignerEntry models
-        s1 = [entry.to_dict() for entry in sig1.signers]
-        s2 = [entry.to_dict() for entry in sig2.signers]
+        s1 = sign(tx, signer1_wallet, multisign=True)
+        s2 = sign(tx, signer2_wallet, multisign=True)
+        # Extract SignerEntry dicts
+        signers = [entry.to_dict() for entry in s1.signers] + [entry.to_dict() for entry in s2.signers]
 
-        # 4) Combine into a multisigned payload
-        multi_payload = {**tx.to_dict(), "Signers": s1 + s2}
+        # 4) Prepare multisigned payload
+        multi_payload = {**tx.to_dict(), "Signers": signers}
 
-        # 5) Submit via JSON-RPC
-        resp = client.request(Submit(tx_json=multi_payload)).result
+        # 5) Encode to blob and submit
+        blob = encode(multi_payload)
+        resp = client.request(Submit(tx_blob=blob)).result
+
         if resp.get("engine_result") != "tesSUCCESS":
             raise HTTPException(500, f"XRPL error: {resp.get('engine_result')}")
 
