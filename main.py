@@ -36,6 +36,15 @@ signer2_wallet = Wallet(seed=signer2_seed)
 # 4) Token Definition (40-char HEX for RCQ-TBILL)
 CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
 
+class MintRequest(BaseModel):
+    cusip: str
+    amount: float
+    date: str       # ISO 8601 date string
+    # Optional: destination: str
+
+class MintResponse(BaseModel):
+    status: str
+    tx_hash: str
 app = FastAPI(title="RCQ-TBILL Token Issuance API")
 
 @app.get("/")
