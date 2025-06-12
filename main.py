@@ -17,6 +17,25 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+app = FastAPI(title="RCQ-TBILL Multisig Issuance")
+
+# 1) XRPL Client (Testnet/Mainnet switch)
+RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234")
+client  = JsonRpcClient(RPC_URL)
+
+# 2) Load seeds from Env
+issuer_seed   = os.getenv("ISSUER_SEED")
+signer1_seed  = os.getenv("SIGNER1_SEED")
+signer2_seed  = os.getenv("SIGNER2_SEED")
+
+# 3) Instantiate Wallets
+issuer_wallet  = Wallet(seed=issuer_seed)
+signer1_wallet = Wallet(seed=signer1_seed)
+signer2_wallet = Wallet(seed=signer2_seed)
+
+# 4) Token Definition (40-char HEX for RCQ-TBILL)
+CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
+
 app = FastAPI(title="RCQ-TBILL Token Issuance API")
 
 @app.get("/")
