@@ -47,6 +47,43 @@ class MintResponse(BaseModel):
     tx_hash: str
 app = FastAPI(title="RCQ-TBILL Token Issuance API")
 
+@app.post("/mint", response_model=MintResponse)
+def mint_tbill(req: MintRequest):
+    try:
+        # ── Build the base Payment ─────────────────────────
+        payment_tx = Payment(
+            account=issuer_wallet.classic_address,
+            destination=req.destination if hasattr(req, "destination") else issuer_wallet.classic_address,
+            amount=IssuedCurrencyAmount(
+                currency=CURRENCY_HEX,
+                issuer=issuer_wallet.classic_address,
+                value=str(req.amount),
+            ),
+        )
+        # ── Autofill fee & sequence ─────────────────────────
+        filled_tx = safe_sign_and_autofill_transaction(payment_tx, issuer_wallet, client)
+
+        # ── Collect multisigs ───────────────────────────────
+        sig1 = sign(filled_tx, signer1_wallet, multisign=True)
+        sig2 = sign(filled_tx, signer2_wallet, multisign=True)
+
+        combined = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
+        multi_signed = MultiSignedTransaction.from_dict({
+            **filled_tx.to_dict(),
+            "Signers": combined
+        })
+
+        # ── Submit & confirm ────────────────────────────────
+        resp = send_reliable_submission(multi_signed, client)
+        result = resp.result
+        if result["engine_result"] != "tesSUCCESS":
+            raise HTTPException(500, f"XRPL error: {result['engine_result']}")
+
+        return MintResponse(status="success", tx_hash=result["tx_json"]["hash"])
+
+    except Exception as e:
+        raise HTTPException(500, f"Mint failed: {str(e)}")
+
 @app.get("/")
 async def root():
     return {"message": "RCQ-TBILL API is live. Use /docs for API."}
