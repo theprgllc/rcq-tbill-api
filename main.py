@@ -3,16 +3,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from xrpl.clients import JsonRpcClient
 from xrpl.wallet import Wallet
-
-# ─── Corrected Imports ────────────────────────────────────────────────
-from xrpl.models.transactions import Payment, MultiSignedTransaction
+from xrpl.models.transactions import Payment
 from xrpl.models.amounts import IssuedCurrencyAmount
-from xrpl.models.requests import AccountInfo
-from xrpl.transaction import (
-    safe_sign_and_autofill_transaction,
-    sign,
-    send_reliable_submission,
-)
+from xrpl.models.requests import AccountInfo, Submit
+from xrpl.transaction import safe_sign_and_autofill_transaction, sign
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────
 RPC_URL = os.getenv(
@@ -55,7 +49,7 @@ def mint_tbill(req: MintRequest):
         # 1) Build the base Payment transaction (single-sign template)
         payment_tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=issuer_wallet.classic_address,    # adjust if you want a different recipient
+            destination=issuer_wallet.classic_address,    # adjust as needed
             amount=IssuedCurrencyAmount(
                 currency=CURRENCY_HEX,
                 issuer=issuer_wallet.classic_address,
@@ -71,25 +65,23 @@ def mint_tbill(req: MintRequest):
         # 3) Apply 2-of-4 multisignature
         sig1 = sign(filled_tx, signer1_wallet, multisign=True)
         sig2 = sign(filled_tx, signer2_wallet, multisign=True)
-
         combined = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
-        multisigned = MultiSignedTransaction.from_dict({
-            **filled_tx.to_dict(),
-            "Signers": combined
-        })
 
-        # 4) Submit and wait for validation
-        resp = send_reliable_submission(multisigned, client)
-        result = resp.result
-        if result.get("engine_result") != "tesSUCCESS":
+        # 4) Prepare multisigned payload
+        multisigned_payload = {**filled_tx.to_dict(), "Signers": combined}
+
+        # 5) Submit via JSON-RPC submit method
+        submit_req = Submit(tx_json=multisigned_payload)
+        submit_resp = client.request(submit_req).result
+        if submit_resp.get("engine_result") != "tesSUCCESS":
             raise HTTPException(
                 status_code=500,
-                detail=f"XRPL error: {result.get('engine_result')}"
+                detail=f"XRPL error: {submit_resp.get('engine_result')}"
             )
 
         return MintResponse(
             status="success",
-            tx_hash=result["tx_json"]["hash"]
+            tx_hash=submit_resp["tx_json"]["hash"]
         )
 
     except Exception as e:
