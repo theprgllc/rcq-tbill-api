@@ -4,11 +4,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from xrpl.clients import JsonRpcClient
 from xrpl.wallet import Wallet
-from xrpl.models.transactions import Payment
+from xrpl.models.transactions import Payment, MultiSignedTransaction
 from xrpl.models.amounts import IssuedCurrencyAmount
-from xrpl.models.requests import AccountInfo, Submit
-from xrpl.transaction import sign
-from xrpl.core.binarycodec import encode  # for tx_blob encoding
+from xrpl.models.requests import AccountInfo
+from xrpl.transaction import sign, send_reliable_submission
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────
 RPC_URL = os.getenv(
@@ -54,13 +53,13 @@ async def root():
 def mint_tbill(req: MintRequest):
     try:
         # 1) Fetch current sequence
-        info = client.request(
+        acct_info = client.request(
             AccountInfo(
                 account=issuer_wallet.classic_address,
                 ledger_index="current"
             )
         ).result
-        seq = info["account_data"]["Sequence"]
+        sequence = acct_info["account_data"]["Sequence"]
 
         # 2) Build unsigned Payment transaction
         issued_amt = IssuedCurrencyAmount(
@@ -68,35 +67,35 @@ def mint_tbill(req: MintRequest):
             issuer=issuer_wallet.classic_address,
             value=str(req.amount)
         )
-        tx = Payment(
+        payment_tx = Payment(
             account=issuer_wallet.classic_address,
             destination=issuer_wallet.classic_address,
             amount=issued_amt,
             send_max=issued_amt,
-            sequence=seq,
+            sequence=sequence,
             fee="12",
             signing_pub_key=""
         )
 
         # 3) Each signer signs the same transaction
-        s1 = sign(tx, signer1_wallet, multisign=True)
-        s2 = sign(tx, signer2_wallet, multisign=True)
-        # Extract SignerEntry dicts
-        signers = [entry.to_dict() for entry in s1.signers] + [entry.to_dict() for entry in s2.signers]
+        sig1 = sign(payment_tx, signer1_wallet, multisign=True)
+        sig2 = sign(payment_tx, signer2_wallet, multisign=True)
+        # Collect SignerEntry dicts
+        signers = [e.to_dict() for e in sig1.signers] + [e.to_dict() for e in sig2.signers]
 
-        # 4) Prepare multisigned payload
-        multi_payload = {**tx.to_dict(), "Signers": signers}
+        # 4) Create MultiSignedTransaction object
+        multi_tx = MultiSignedTransaction.from_dict({**payment_tx.to_dict(), "Signers": signers})
 
-        # 5) Encode to blob and submit
-        blob = encode(multi_payload)
-        resp = client.request(Submit(tx_blob=blob)).result
+        # 5) Submit via send_reliable_submission
+        resp = send_reliable_submission(multi_tx, client)
+        result = resp.result
+        if result.get("engine_result") != "tesSUCCESS":
+            raise HTTPException(500, f"XRPL error: {result.get('engine_result')}")
 
-        if resp.get("engine_result") != "tesSUCCESS":
-            raise HTTPException(500, f"XRPL error: {resp.get('engine_result')}")
-
-        return MintResponse(status="success", tx_hash=resp["tx_json"]["hash"])
+        return MintResponse(status="success", tx_hash=result["tx_json"]["hash"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
+
 
 
 
