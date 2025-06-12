@@ -8,119 +8,105 @@ from xrpl.models.transactions import (
     IssuedCurrencyAmount,
     MultiSignedTransaction,
 )
-from xrpl.models.transactions import SignerEntry
 from xrpl.models.requests import AccountInfo
-from xrpl.transaction import safe_sign_and_autofill_transaction, sign, send_reliable_submission
+from xrpl.transaction import (
+    safe_sign_and_autofill_transaction,
+    sign,
+    send_reliable_submission,
+)
 
+# ─── CONFIGURATION ────────────────────────────────────────────────────
 
-from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+# XRPL RPC URL (Testnet default; override via env var for Mainnet)
+RPC_URL = os.getenv(
+    "XRPL_RPC_URL",
+    "https://s.altnet.rippletest.net:51234"
+)
+client = JsonRpcClient(RPC_URL)
 
-app = FastAPI(title="RCQ-TBILL Multisig Issuance")
+# Load signer seeds from environment variables
+ISSUER_SEED   = os.getenv("ISSUER_SEED")
+SIGNER1_SEED  = os.getenv("SIGNER1_SEED")
+SIGNER2_SEED  = os.getenv("SIGNER2_SEED")
+# (Optionally: add SIGNER3_SEED, SIGNER4_SEED)
 
-# 1) XRPL Client (Testnet/Mainnet switch)
-RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234")
-client  = JsonRpcClient(RPC_URL)
+# Instantiate XRPL Wallets
+issuer_wallet  = Wallet(seed=ISSUER_SEED)
+signer1_wallet = Wallet(seed=SIGNER1_SEED)
+signer2_wallet = Wallet(seed=SIGNER2_SEED)
 
-# 2) Load seeds from Env
-issuer_seed   = os.getenv("ISSUER_SEED")
-signer1_seed  = os.getenv("SIGNER1_SEED")
-signer2_seed  = os.getenv("SIGNER2_SEED")
-
-# 3) Instantiate Wallets
-issuer_wallet  = Wallet(seed=issuer_seed)
-signer1_wallet = Wallet(seed=signer1_seed)
-signer2_wallet = Wallet(seed=signer2_seed)
-
-# 4) Token Definition (40-char HEX for RCQ-TBILL)
+# Your custom token’s 40-char hex code for “RCQ-TBILL”
 CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
+
+# ─── Pydantic Models ───────────────────────────────────────────────────
 
 class MintRequest(BaseModel):
     cusip: str
     amount: float
-    date: str       # ISO 8601 date string
-    # Optional: destination: str
+    date: str    # ISO 8601 date string
 
 class MintResponse(BaseModel):
     status: str
     tx_hash: str
-app = FastAPI(title="RCQ-TBILL Token Issuance API")
+
+# ─── FastAPI App ──────────────────────────────────────────────────────
+
+app = FastAPI(title="RCQ-TBILL Multisig Issuance API")
+
+@app.get("/")
+async def root():
+    return {"message": "RCQ-TBILL API is live. Use /docs for API."}
 
 @app.post("/mint", response_model=MintResponse)
 def mint_tbill(req: MintRequest):
+    """
+    Mint RCQ-TBILL tokens via a 2-of-4 multisig issuer account.
+    """
     try:
-        # ── Build the base Payment ─────────────────────────
+        # 1) Build the base Payment transaction (single-sign template)
         payment_tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=req.destination if hasattr(req, "destination") else issuer_wallet.classic_address,
+            destination=issuer_wallet.classic_address,  # or pass in a req.destination
             amount=IssuedCurrencyAmount(
                 currency=CURRENCY_HEX,
                 issuer=issuer_wallet.classic_address,
                 value=str(req.amount),
             ),
         )
-        # ── Autofill fee & sequence ─────────────────────────
-        filled_tx = safe_sign_and_autofill_transaction(payment_tx, issuer_wallet, client)
 
-        # ── Collect multisigs ───────────────────────────────
+        # 2) Autofill fee & sequence using the issuer wallet
+        filled_tx = safe_sign_and_autofill_transaction(
+            payment_tx, issuer_wallet, client
+        )
+
+        # 3) Each signer applies a multisignature
         sig1 = sign(filled_tx, signer1_wallet, multisign=True)
         sig2 = sign(filled_tx, signer2_wallet, multisign=True)
 
-        combined = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
-        multi_signed = MultiSignedTransaction.from_dict({
+        # 4) Combine signatures into a MultiSignedTransaction
+        combined_signers = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
+        multisigned = MultiSignedTransaction.from_dict({
             **filled_tx.to_dict(),
-            "Signers": combined
+            "Signers": combined_signers
         })
 
-        # ── Submit & confirm ────────────────────────────────
-        resp = send_reliable_submission(multi_signed, client)
+        # 5) Submit the multisigned envelope and wait for validation
+        resp = send_reliable_submission(multisigned, client)
         result = resp.result
-        if result["engine_result"] != "tesSUCCESS":
-            raise HTTPException(500, f"XRPL error: {result['engine_result']}")
 
-        return MintResponse(status="success", tx_hash=result["tx_json"]["hash"])
+        if result.get("engine_result") != "tesSUCCESS":
+            raise HTTPException(
+                status_code=500,
+                detail=f"XRPL error: {result.get('engine_result')}"
+            )
+
+        # Return the transaction hash on success
+        return MintResponse(
+            status="success",
+            tx_hash=result["tx_json"]["hash"]
+        )
 
     except Exception as e:
-        raise HTTPException(500, f"Mint failed: {str(e)}")
+        # Bubble up any errors as a 500
+        raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
 
-@app.get("/")
-async def root():
-    return {"message": "RCQ-TBILL API is live. Use /docs for API."}
-
-# === Config ===
-XRPL_ISSUER_ADDRESS = "rXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"  # Your Trust's XRPL address
-
-# === Models ===
-class TBillActionRequest(BaseModel):
-    cusip: str
-    amount: float
-    date: str  # ISO format (e.g., 2025-06-10)
-
-class TBillActionResponse(BaseModel):
-    status: str
-    tx_hash: Optional[str]
-    message: Optional[str] = None
-
-# === Mint Endpoint ===
-@app.post("/mint", response_model=TBillActionResponse)
-async def mint_token(req: TBillActionRequest):
-    try:
-        tx_hash = f"SIMULATED_TX_HASH_MINT_{req.cusip}"
-        return TBillActionResponse(status="success", tx_hash=tx_hash)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# === Burn Endpoint ===
-@app.post("/burn", response_model=TBillActionResponse)
-async def burn_token(req: TBillActionRequest):
-    try:
-        tx_hash = f"SIMULATED_TX_HASH_BURN_{req.cusip}"
-        return TBillActionResponse(status="success", tx_hash=tx_hash)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# === Audit Log Placeholder ===
-@app.get("/audit-log")
-async def audit_log():
-    return {"status": "pending", "logs": []}
