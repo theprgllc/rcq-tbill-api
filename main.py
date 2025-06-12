@@ -19,9 +19,10 @@ ISSUER_SEED   = os.getenv("ISSUER_SEED")
 SIGNER1_SEED  = os.getenv("SIGNER1_SEED")
 SIGNER2_SEED  = os.getenv("SIGNER2_SEED")
 
-issuer_wallet  = Wallet(seed=ISSUER_SEED)
-signer1_wallet = Wallet(seed=SIGNER1_SEED)
-signer2_wallet = Wallet(seed=SIGNER2_SEED)
+# Wallet class requires seed and initial sequence
+issuer_wallet  = Wallet(ISSUER_SEED, 0)
+signer1_wallet = Wallet(SIGNER1_SEED, 0)
+signer2_wallet = Wallet(SIGNER2_SEED, 0)
 
 # RCQ-TBILL token code (40-character HEX)
 CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
@@ -49,7 +50,7 @@ def mint_tbill(req: MintRequest):
         # 1) Build the base Payment transaction (single-sign template)
         payment_tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=issuer_wallet.classic_address,    # adjust as needed
+            destination=issuer_wallet.classic_address,
             amount=IssuedCurrencyAmount(
                 currency=CURRENCY_HEX,
                 issuer=issuer_wallet.classic_address,
@@ -67,12 +68,11 @@ def mint_tbill(req: MintRequest):
         sig2 = sign(filled_tx, signer2_wallet, multisign=True)
         combined = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
 
-        # 4) Prepare multisigned payload
-        multisigned_payload = {**filled_tx.to_dict(), "Signers": combined}
-
-        # 5) Submit via JSON-RPC submit method
-        submit_req = Submit(tx_json=multisigned_payload)
+        # 4) Prepare multisigned payload and submit
+        multi_signed_payload = {**filled_tx.to_dict(), "Signers": combined}
+        submit_req = Submit(tx_json=multi_signed_payload)
         submit_resp = client.request(submit_req).result
+
         if submit_resp.get("engine_result") != "tesSUCCESS":
             raise HTTPException(
                 status_code=500,
@@ -86,3 +86,4 @@ def mint_tbill(req: MintRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
+
