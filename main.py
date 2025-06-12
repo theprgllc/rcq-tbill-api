@@ -1,4 +1,5 @@
 import os
+import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from xrpl.clients import JsonRpcClient
@@ -6,7 +7,7 @@ from xrpl.wallet import Wallet
 from xrpl.models.transactions import Payment
 from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.requests import AccountInfo, Submit
-from xrpl.transaction import safe_sign_and_autofill_transaction, sign
+from xrpl.transaction import sign
 
 # ─── CONFIGURATION ────────────────────────────────────────────────────
 RPC_URL = os.getenv(
@@ -15,27 +16,27 @@ RPC_URL = os.getenv(
 )
 client = JsonRpcClient(RPC_URL)
 
-# Load and validate environment seeds
-ISSUER_SEED = os.getenv("ISSUER_SEED")
+# Load seeds from environment
+ISSUER_SEED  = os.getenv("ISSUER_SEED")
 SIGNER1_SEED = os.getenv("SIGNER1_SEED")
 SIGNER2_SEED = os.getenv("SIGNER2_SEED")
-for key, value in [("ISSUER_SEED", ISSUER_SEED), ("SIGNER1_SEED", SIGNER1_SEED), ("SIGNER2_SEED", SIGNER2_SEED)]:
-    if not value:
-        raise RuntimeError(f"Environment variable {key} is not set. Please configure it.")
+for key, val in [("ISSUER_SEED", ISSUER_SEED), ("SIGNER1_SEED", SIGNER1_SEED), ("SIGNER2_SEED", SIGNER2_SEED)]:
+    if not val:
+        raise RuntimeError(f"Missing environment variable: {key}")
 
-# Use Wallet.from_seed to avoid constructor changes
-issuer_wallet = Wallet.from_seed(ISSUER_SEED)
-signer1_wallet = Wallet.from_seed(SIGNER1_SEED)
-signer2_wallet = Wallet.from_seed(SIGNER2_SEED)
+# Initialize wallets (seed, sequence)
+issuer_wallet  = Wallet(ISSUER_SEED, 0)
+signer1_wallet = Wallet(SIGNER1_SEED, 0)
+signer2_wallet = Wallet(SIGNER2_SEED, 0)
 
-# RCQ-TBILL token code (40-character HEX)
+# RCQ-TBILL custom token code (hex)
 CURRENCY_HEX = "5243512D5442494C4C0000000000000000000000"
 
 # ─── Pydantic Models ───────────────────────────────────────────────────
 class MintRequest(BaseModel):
     cusip: str
     amount: float
-    date: str    # ISO 8601 date string
+    date: str    # ISO 8601 date
 
 class MintResponse(BaseModel):
     status: str
@@ -51,42 +52,47 @@ async def root():
 @app.post("/mint", response_model=MintResponse)
 def mint_tbill(req: MintRequest):
     try:
-        # 1) Build base Payment
-        payment_tx = Payment(
+        # 1) Fetch current sequence for issuer
+        acct_info = client.request(
+            AccountInfo(
+                account=issuer_wallet.classic_address,
+                ledger_index="current"
+            )
+        ).result
+        sequence = acct_info["account_data"]["Sequence"]
+
+        # 2) Build Payment transaction (unsigned)
+        tx = Payment(
             account=issuer_wallet.classic_address,
-            destination=issuer_wallet.classic_address,
+            destination=issuer_wallet.classic_address,  # change if desired
             amount=IssuedCurrencyAmount(
                 currency=CURRENCY_HEX,
                 issuer=issuer_wallet.classic_address,
-                value=str(req.amount),
+                value=str(req.amount)
             ),
+            sequence=sequence,
+            fee="12",
+            signing_pub_key=""
         )
 
-        # 2) Autofill
-        filled_tx = safe_sign_and_autofill_transaction(
-            payment_tx, issuer_wallet, client
-        )
+        # 3) Sign with two signers (multisign=True)
+        s1 = sign(tx, signer1_wallet, multisign=True)
+        s2 = sign(tx, signer2_wallet, multisign=True)
+        combined = s1.tx_json["Signers"] + s2.tx_json["Signers"]
 
-        # 3) Multisign
-        sig1 = sign(filled_tx, signer1_wallet, multisign=True)
-        sig2 = sign(filled_tx, signer2_wallet, multisign=True)
-        combined = sig1.tx_json["Signers"] + sig2.tx_json["Signers"]
+        # 4) Prepare multisigned payload
+        multi_signed = {**tx.to_dict(), "Signers": combined}
 
-        # 4) Submit
-        multi_signed_payload = {**filled_tx.to_dict(), "Signers": combined}
-        submit_req = Submit(tx_json=multi_signed_payload)
-        submit_resp = client.request(submit_req).result
-
-        if submit_resp.get("engine_result") != "tesSUCCESS":
+        # 5) Submit via JSON-RPC
+        resp = client.request(Submit(tx_json=multi_signed)).result
+        if resp.get("engine_result") != "tesSUCCESS":
             raise HTTPException(
                 status_code=500,
-                detail=f"XRPL error: {submit_resp.get('engine_result')}"
+                detail=f"XRPL error: {resp.get('engine_result')}"
             )
 
-        return MintResponse(
-            status="success",
-            tx_hash=submit_resp["tx_json"]["hash"]
-        )
+        return MintResponse(status="success", tx_hash=resp["tx_json"]["hash"])
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
 
