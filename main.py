@@ -3,11 +3,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from xrpl.clients import JsonRpcClient
 from xrpl.wallet import Wallet
-from xrpl.models.transactions import (
-    Payment,
-    IssuedCurrencyAmount,
-    MultiSignedTransaction,
-)
+
+# ─── Corrected Imports ────────────────────────────────────────────────
+from xrpl.models.transactions import Payment, MultiSignedTransaction
+from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.requests import AccountInfo
 from xrpl.transaction import (
     safe_sign_and_autofill_transaction,
@@ -95,5 +94,3 @@ def mint_tbill(req: MintRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mint failed: {e}")
-
-
